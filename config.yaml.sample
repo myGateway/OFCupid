@@ -1,0 +1,18 @@
+---
+# A comment
+
+# The dpid of a switch in hex
+0x1a5:
+	"name": "The friendly name for this switch"
+	"blocked": [1,3] # These are inaccessible
+	"mininet": [5-9] # [5,6,7,8,9,10]
+	# Almost anything will work here as long as it is non-numeric
+	"switch1": [20,10to14] # [10,11,12,13,14,20]
+	# but you probably should not
+	"switch2": [15+19] # [15,16,17,18,19]
+	"controller": 6 # [6]
+
+# Another switch the dpid of a switch in decimal
+10:
+	#empty
+# This is valid, the names for ports are taken from the switch

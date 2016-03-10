@@ -1,0 +1,12 @@
+.clear {
+	clear: both;
+}
+.floatleft {
+	float: left;
+}
+.no-margin {
+	margin: 0;
+}
+.clickable {
+	cursor: pointer;
+}

@@ -1,0 +1,157 @@
+<html>
+<head>
+<title>OFCupid Programmable Patch Panel</title>
+<!-- Bootstrap -->
+<link rel="stylesheet" href="third_party/bootstrap.min.css">
+<link rel="stylesheet" type="text/css" href="ofcupid.css">
+</head>
+<body ng-app="patch_manager">
+<div ng-controller = "tabsController">
+  <div class="navbar navbar-default">
+    <div class="container-fluid">
+      <div class="navbar-header">
+        <a class="navbar-brand">OFCupid</a>
+      </div>
+      <ul class="nav navbar-nav">
+        <li class="clickable" ng-class="{active: tab==1}" ng-click="tab = 1"><a href >Ports</a></li>
+        <li class="clickable" ng-class="{active: tab==2}" ng-click="tab = 2"><a href >Links</a></li>
+      </ul>
+      <label class="navbar-text form-group">Switch:
+        <select class="navbar-form no-margin" ng-controller="pickSwitch" ng-model="userChoice" ng-change="select_switch()">
+          <option value="" default >All</option>
+          <option value="{{switch.dpid}}" ng-repeat = "switch in switches"> {{switch.dpid_name}} </option>
+        </select>
+      </label>
+      <div class="navbar-right container-fluid">
+        <div class="navbar-header">
+		<a class="navbar-brand clickable" ng-click="refresh()" href><h2 class="no-margin">&#8635;</h2></a>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="clear"> </div>
+  <div ng-show="tab == 1" ng-controller = "portsController">
+    <table class="table table-condensed table-bordered table-hover">
+      <thead>
+        <tr>
+          <th></th>
+          <th ng-hide="dpid !== ''">Switch</th>
+          <th>Port</th>
+          <th>Link Speed</th>
+          <th>Destinations</th>
+          <th ng-hide="userChoice == false">New Destinations</th>
+        </tr>
+      </thead>
+
+      <tr ng-repeat = "port in ports | orderBy:['dpid', 'port']"
+        ng-click="setSelected(port, $event)"
+        ng-class="{success: sel.indexOf(port) !== -1,
+        active: isDisabled(port),
+        info: isConnected(port)}">
+        <td><input type="checkbox"
+          ng-checked="sel.indexOf(port) !== -1"
+          ng-disabled="isDisabled(port)||isConnected(port)" ></td>
+        <td ng-hide="dpid !== ''">{{ port.dpid_name }}</td>
+        <td>{{port | print_port}}</td>
+        <td>{{ port.curr_speed | kbits }}</td>
+        <td>{{ port.links.toString() }}</td>
+        <td ng-hide='userChoice == false'>{{ port.new_links.toString() }}</td>
+      </tr>
+    </table>
+    <p><small>Press Control or Shift while selecting items to only select 1 at a time</small></p>
+
+    <div class="form-group">
+      <button class="btn btn-primary" ng-click="install_link()" ng-disabled="sel.length !== 2">Link</button>
+      <button class="btn btn-danger" ng-click="unlink_port()" ng-disabled="sel.length !== 1">Delete Associated Links</button></br>
+    </div>
+
+    <div class="form-group form-inline">
+      <label class="control-label">Load Configuration :
+        <select class="form-control" ng-model="userChoice" ng-change="select_conf()">
+          <option value="">---Please Select---</option>
+          <option value="{{config}}" ng-repeat = "config in configs"> {{config}} </option>
+        </select>
+      </label>
+      <form name="buttons" class="radio">
+        <label>
+          <input type="radio" ng-model="merge" value="replace_all" ng-change="select_conf()" >
+          Replace All
+        </label>
+        <label>
+          <input type="radio" ng-model="merge" value="replace_ports" ng-change="select_conf()" >
+          Replace Ports
+        </label>
+        <label>
+          <input type="radio" ng-model="merge" value="combine" ng-change="select_conf()" >
+          Merge
+        </label>
+      </form>
+      <button class="btn btn-primary" ng-disabled='userChoice == false' ng-click="load_conf()">Load</button></br>
+    </div>
+
+    <div class="form-inline">
+      <label class="control-label">Save Current Configuration:
+        <div class="input-group">
+          <input class="form-control" ng-model="saveAs" placeholder="Save As">
+          <span class="input-group-btn">
+            <button class="btn btn-primary" ng-disabled='saveAs == false' ng-click="save_conf()" >Save</button>
+          </span>
+        </div>
+      </label>
+    </div>
+  </div>
+  <div ng-show = "tab == 2" ng-controller = "linksController">
+    <form class="form-inline">
+      <div class="form-group">
+        <label class="control-label">Filter Port: <input class="form-control" ng-model="fil1.src.port" placeholder="Filter Port" /></label>
+      </div>
+      <div class="form-group">
+        <label class="control-label">Filter Name: <input class="form-control" ng-model="fil2.src.port_name" placeholder="Filter Name" /></label>
+      </div>
+      <div class="form-group">
+        <label class="control-label">Show Reverse: <input class="form-control" type="checkbox" ng-model="show_rev" /></label>
+      </div>
+    </form>
+    <table class="table table-condensed table-bordered table-hover">
+      <thead>
+        <tr>
+          <th></th>
+          <th ng-hide="dpid !== ''">Switch</th>
+          <th>Source Port</th>
+          <th>Destination Port</th>
+        </tr>
+      </thead>
+      <tr ng-repeat="link in links | filter:f_reverse | filter:fil1 | filter:fil2 |
+        orderBy:['src.dpid', 'src.port', 'dst.port']"
+        ng-click="click(link)"
+        ng-class="{success: link.selected}">
+        <td><input type="checkbox" ng-checked="link.selected" ></td>
+        <td ng-hide="dpid !== ''">{{(link.src.dpid_name)}}</td>
+        <td>{{link.src | print_port}}</td>
+        <td>{{link.dst | print_port}}</td>
+      </tr>
+    </table>
+
+    <div class="form-group">
+      <button class="btn btn-danger" ng-click="unlink()">Delete</button>
+    </div>
+  </div>
+
+  <div class="errors" ng-repeat="error in errors">
+    <div class="alert" ng-click="error.full = !error.full"
+      ng-class="{'alert-warning': error.type=='warn',
+      'alert-danger': error.type=='error',
+      'alert-success': error.type=='debug',
+      'alert-info': error.type=='info'}" >
+      <span ng-click='errors.splice(errors.indexOf(error), 1)'>&#x2716;</span>
+      {{error.summary}}   <span ng-hide='error.full'>&#9660;</span> <span ng-hide='!error.full'>&#9650;</span> 
+      <span ng-hide='!error.full'><br> {{error.msg}} </span>
+    </div>
+  </div>
+</div>
+
+<script src = "third_party/angular.min.js"></script>
+<script src = "ofcupid.js"></script>
+</body>
+</html>
+
