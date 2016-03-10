@@ -1,4 +1,4 @@
-# Patch Manger
+# OFCupid
 
 OFCupid is a Ryu based OpenFlow 1.3 programmable patch panel. Which can be accessed either through a web-ui or directly via the REST API for scripting.
 
