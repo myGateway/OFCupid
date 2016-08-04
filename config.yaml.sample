@@ -1,6 +1,9 @@
 ---
 # A comment
 
+# Directory where saved configuration files should go
+saved_configs_dir: "./configs/"
+
 # The dpid of a switch in hex
 0x1a5:
 	"name": "The friendly name for this switch"

@@ -10,6 +10,7 @@ import yaml
 import re
 import glob
 import os
+import sys
 import traceback
 
 from ryu.base import app_manager
@@ -22,8 +23,6 @@ from ryu.app.wsgi import ControllerBase, WSGIApplication, route
 from collections import defaultdict
 
 simple_switch_instance_name = 'simple_switch_api_app'
-configuration_file = 'config.yaml'
-saved_configurations = './configs/'
 
 # Logging
 log = logging.getLogger("patch_logger")
@@ -62,6 +61,7 @@ class PatchPanel(app_manager.RyuApp):
         self.dpset = kwargs['dpset']
         signal.signal(signal.SIGHUP, self.signal_handler)
         self.parse_config()
+        self.create_saved_configs_dir()
         self.log.debug("Init Complete")
 
     def signal_handler(self, sigid, frame):
@@ -69,6 +69,7 @@ class PatchPanel(app_manager.RyuApp):
             self.log.info("Caught SIGHUP, reloading configuration")
             self.mappings = defaultdict(lambda: defaultdict(set))
             self.parse_config()
+            self.create_saved_configs_dir()
 
     def expand_ranges(self, l):
         new = []
@@ -99,7 +100,21 @@ class PatchPanel(app_manager.RyuApp):
             we will talk to and so on and friendly names
         """
         self.conf = {}
-        with open(configuration_file, 'r') as stream:
+
+        conf_dirs = ['.', '/etc/ryu/ofcupid/']
+        conf_file = None
+        for conf_dir in conf_dirs:
+            filename = os.path.join(conf_dir, "config.yaml")
+            if os.path.exists(filename):
+                conf_file = filename
+                self.log.debug("Reading configuration from %s", conf_file)
+                break
+        if not conf_file:
+            self.log.error("Couldn't find a configuration file in these directories: %s",
+                    conf_dirs)
+            sys.exit()
+
+        with open(conf_file, 'r') as stream:
             conf = yaml.load(stream)
             for dpid, dconf in conf.items():
                 # Convert any strings into sensible lists
@@ -116,11 +131,26 @@ class PatchPanel(app_manager.RyuApp):
                                 self.conf[dpid][port] = name
                 else:
                     self.conf[dpid] = copy.deepcopy(dconf)
+
+        # Set some default config values
+        self.conf.setdefault('saved_configs_dir', './configs/')
+
         self.log.debug("Loaded configuration: %s", self.conf)
 
         # Reload connected switches, which will also clear non-managed switches
         for i, dp in self.dpset.get_all():
             self.reload_switch(dp)
+
+    def create_saved_configs_dir(self):
+        """ Create directory for saved configuration files if it doesn't exist """
+        if os.path.exists(self.conf['saved_configs_dir']):
+            return
+
+        try:
+            os.makedirs(self.conf['saved_configs_dir'])
+        except Exception as e:
+            self.log.error("Failed to create directory for saved configs %s, reason: %s",
+                    self.conf['saved_configs_dir'], e)
 
     def add_flow(self, datapath, priority, match, actions):
         ofproto = datapath.ofproto
@@ -375,7 +405,7 @@ class PatchPanel(app_manager.RyuApp):
         return True
 
     def get_configs(self):
-        configs = glob.glob(saved_configurations + "/*.yaml")
+        configs = glob.glob(self.conf['saved_configs_dir'] + "/*.yaml")
         configs = [c.split("/")[-1][0:-5] for c in configs]
         return configs
 
@@ -420,7 +450,7 @@ class PatchPanel(app_manager.RyuApp):
         raise ValueError("Invalid Path")
 
     def load_conf(self, name, simulate, merge="replace_all", dpid=""):
-        name = self.validate_path(saved_configurations, name + ".yaml")
+        name = self.validate_path(self.conf['saved_configs_dir'], name + ".yaml")
         with open(name, 'r') as stream:
             conf = yaml.load(stream)
             new = self.emulate_conf(conf, merge, dpid)
@@ -431,7 +461,7 @@ class PatchPanel(app_manager.RyuApp):
                 return self.get_ports()
 
     def save_conf(self, name):
-        name = self.validate_path(saved_configurations, name + ".yaml")
+        name = self.validate_path(self.conf['saved_configs_dir'], name + ".yaml")
         data = {}
         print self.mappings
         for dpid, dconf in self.mappings.iteritems():
