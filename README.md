@@ -100,10 +100,10 @@ the docker.
 This can be launched as following:
 ```
 docker pull wandsdn/ofcupid
-docker run -d --name ofcupid \\
-           -v /path/to/ofcupid_config/:/etc/ryu/ofcupid/ \\
-           -p 80:8080 \\
-           -p 6653:6653 \\
+docker run -d --name ofcupid \
+           -v /path/to/ofcupid_config/:/etc/ryu/ofcupid/ \
+           -p 80:8080 \
+           -p 6653:6653 \
            wandsdn/ofcupid
 
 ```
