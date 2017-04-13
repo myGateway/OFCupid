@@ -18,8 +18,27 @@ app.filter('kbits', function() {
 
 /** Angular filter to print a port in human readable form */
 app.filter('print_port', function() {
-    return function(port) { return port.port + " - " + port.port_name; 
-  }
+    return function(port) {
+        return port.port + " - " + port.port_name
+    }
+});
+
+app.filter('print_vlan', function() {
+    return function(port) {
+        switch(port.vlan) {
+            case -1:
+                return "All including untagged"
+                break;
+            case 0:
+                return "None"
+                break;
+            case 0xFFF:
+                return "All"
+                break;
+            default:
+                return port.vlan;
+        }
+    }
 });
 
 /** Global storage for logging errors so we can access from
@@ -67,7 +86,7 @@ var pickSwitch = function ($scope, $http, $rootScope, $log) {
   };
 
   /** Handler for refresh button on nav menu - updates entire interface */
-  $rootScope.$on('full_refresh', function(event, args) { 
+  $rootScope.$on('full_refresh', function(event, args) {
     $scope.refresh();
   });
 
@@ -114,24 +133,26 @@ var portsController = function ($scope, $http, $rootScope, $log) {
   };
 
   $scope.saveAs = '';
-  $scope.merge = 'replace_all';
+  $scope.merge = 'replace';
   $scope.refresh();
 
   $scope.install_link = function() {
-    $http.put("api/link",
-              {'dpid': $scope.sel[0].dpid, 
-               'portA': $scope.sel[0].port,
-               'portB': $scope.sel[1].port}).then(
+    link_params = {'dpid': $scope.sel[0].dpid,
+                  'porta': $scope.sel[0].port,
+                  'portb': $scope.sel[1].port}
+    if('vlan_vid' in $scope.sel[0]) {
+        link_params['porta.vlan_vid'] = parseInt($scope.sel[0].vlan_vid);
+    }
+    if('vlan_vid' in $scope.sel[1]) {
+        link_params['portb.vlan_vid'] = parseInt($scope.sel[1].vlan_vid);
+    }
+    $http.put("api/link", link_params).then(
       function(response) {
         $rootScope.$emit('refresh');
       },
       function(response) {
         $log.warn("Failed to link ports", response.data);
       });
-  };
-
-  $scope.isConnected = function (port) {
-    return $scope.sel.length && $scope.sel[0].links.indexOf(port.port) !== -1;
   };
 
   $scope.isDisabled = function (port) {
@@ -146,6 +167,9 @@ var portsController = function ($scope, $http, $rootScope, $log) {
   };
 
   $scope.setSelected = function(port, $event) {
+    if ($event.target.tagName == 'INPUT' && $event.target.type == 'text') {
+        return
+    }
     if ($event.ctrlKey || $event.shiftKey) {
       if ($scope.sel.indexOf(port) === -1)
         $scope.sel = [port];
@@ -153,7 +177,7 @@ var portsController = function ($scope, $http, $rootScope, $log) {
         $scope.sel = [];
       return;
     }
-    if ($scope.isDisabled(port) || $scope.isConnected(port))
+    if ($scope.isDisabled(port))
       return;
     if ($scope.sel.indexOf(port) === -1) {
       if ($scope.sel.length < 2) {
@@ -269,8 +293,8 @@ var linksController = function ($scope, $http, $rootScope, $log) {
   $scope.refresh();
 
   $scope.compare_items = function(a,b) {
-    if ((a.src.port === b.src.port && a.dst.port === b.dst.port) ||
-        (a.dst.port === b.src.port && a.src.port === b.dst.port)) {
+    if ((a.src.port === b.src.port && a.src.vlan === b.src.vlan && a.dst.port === b.dst.port && a.dst.vlan === b.dst.vlan) ||
+        (a.dst.port === b.src.port && a.dst.vlan === b.src.vlan && a.src.port === b.dst.port && a.src.vlan === b.dst.vlan)) {
           return true;
         }
     return false;
@@ -298,8 +322,10 @@ var linksController = function ($scope, $http, $rootScope, $log) {
       if (item.selected) {
         $http.put('api/unlink',
                   {"dpid": item.src.dpid,
-                   "portA": item.src.port,
-                   "portB": item.dst.port}).then(
+                   "porta": item.src.port,
+                   "porta.vlan_vid": item.src.vlan,
+                   "portb": item.dst.port,
+                   "portb.vlan_vid": item.dst.vlan}).then(
           (function(item) { return function(response) {
             //$scope.links.splice($scope.links.indexOf(item), 1);
             $rootScope.$emit('refresh');

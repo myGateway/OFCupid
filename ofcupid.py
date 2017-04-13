@@ -2,19 +2,20 @@
 #
 # Licensed under MIT
 
+import copy
+import glob
 import json
 import logging
-import signal
-import copy
-import yaml
-import re
-import glob
 import os
+import pprint
+import re
+import signal
 import sys
 import traceback
+import yaml
 
 from ryu.base import app_manager
-from ryu.ofproto import ofproto_v1_3
+from ryu.ofproto import ofproto_v1_3, ether
 from webob import Response
 from ryu.controller import ofp_event, dpset
 from ryu.controller.handler import MAIN_DISPATCHER
@@ -39,15 +40,123 @@ def handleException(func):
             os._exit(-1)
     return handler
 
+class DPID(object):
+    def __init__(self, dpid):
+        self.id = int(dpid)
+        self.mappings = set()
+        self.buckets = {}
+
+    def __str__(self):
+        return "DPID:{} links:<{}>".format(self.id,
+                ', '.join([str(l) for l in self.mappings]))
+
+
+class Link(object):
+    def __init__(self, porta, portb):
+        self.porta = min(porta, portb)
+        self.portb = max(porta, portb)
+        # False for bidirectional, or set to output port
+        self.unidirectional = False
+
+    def __str__(self):
+        return "{}<->{}".format(self.porta, self.portb)
+
+    def __hash__(self):
+        return hash((self.porta, self.portb))
+
+    def __eq__(self, other):
+        if not isinstance(other, Link):
+            return NotImplemented
+        return (self.porta, self.portb, self.unidirectional) == (other.porta, other.portb, other.unidirectional)
+
+    def __ne__(self, other):
+        if not isinstance(other, Link):
+            return NotImplemented
+        return self != other
+
+
+class Port(object):
+    # VLAN 0xFFF means any VLAN
+    # VLAN 0x000 means untagged traffic
+    # VLAN -1 means both untagged and tagged traffic
+    def __init__(self, number, vlan=-1):
+        if isinstance(number, str) and '.' in number:
+            _number, _vlan = number.split('.', 1)
+            self.set_number(_number)
+            self.set_vlan(_vlan)
+        else:
+            self.set_number(number)
+            self.set_vlan(vlan)
+
+    def get_number(self):
+        return self._port_number
+
+    def set_number(self, number):
+        self._port_number = int(number)
+
+    def get_vlan(self):
+        return self._vlan_vid
+
+    def set_vlan(self, vlan):
+        self._vlan_vid = int(vlan)
+
+    def serialized(self):
+        if self.vlan >= 0:
+            return "{}.{}".format(self.number, self.vlan)
+        return str(self.number)
+
+    number = property(get_number, set_number)
+    vlan = property(get_vlan, set_vlan)
+
+    def __str__(self):
+        if self.vlan == 0xFFF:
+            return "{}.*".format(self.number)
+        elif self.vlan >= 0:
+            return "{}.{}".format(self.number, self.vlan)
+        return str(self.number)
+
+    def __hash__(self):
+        return hash((self.number, self.vlan))
+
+    def __eq__(self, other):
+        if not isinstance(other, Port):
+            return NotImplemented
+        return (self.number, self.vlan) == (other.number, other.vlan)
+
+    def __ne__(self, other):
+        if not isinstance(other, Port):
+            return NotImplemented
+        return self != other
+
+    def __lt__(self, other):
+        if not isinstance(other, Port):
+            return NotImplemented
+        return self.number < other.number
+
+    def __le__(self, other):
+        if not isinstance(other, Port):
+            return NotImplemented
+        return self.number <= other.number
+
+    def __gt__(self, other):
+        if not isinstance(other, Port):
+            return NotImplemented
+        return self.number > other.number
+
+    def __ge__(self, other):
+        if not isinstance(other, Port):
+            return NotImplemented
+        return self.number >= other.number
+
 
 class PatchPanel(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
     _CONTEXTS = {'wsgi': WSGIApplication, 'dpset': dpset.DPSet}
     DROP_PRIORITY = 1000
     NORMAL_PRIORITY = 2000
+    VLAN_PRIORITY = 3000
     COOKIE = 0x42
-    # Mappings [dpid][port_in] to [port_out(s)], else drop
-    mappings = defaultdict(lambda: defaultdict(set))
+    datapaths = {}
     # Config [dpid][port] -> port name (or blocked) if blocked
     conf = {}
     s_names = {}
@@ -67,22 +176,22 @@ class PatchPanel(app_manager.RyuApp):
     def signal_handler(self, sigid, frame):
         if sigid == signal.SIGHUP:
             self.log.info("Caught SIGHUP, reloading configuration")
-            self.mappings = defaultdict(lambda: defaultdict(set))
+            self.datapaths = {}
             self.parse_config()
             self.create_saved_configs_dir()
 
     def expand_ranges(self, l):
         new = []
-        if type(l) is list:
+        if isinstance(l, list):
             pass
-        elif type(l) is int:
+        elif isinstance(l, int):
             return [l]
         else:
             self.log.warning("Failed to parse config item %s", l)
             return []
 
         for i in l:
-            if type(i) is int:
+            if isinstance(i, int):
                 new.append(i)
             elif isinstance(i, str):
                 parsed = re.findall("(\d+)", i)
@@ -111,14 +220,14 @@ class PatchPanel(app_manager.RyuApp):
                 break
         if not conf_file:
             self.log.error("Couldn't find a configuration file in these directories: %s",
-                    conf_dirs)
+                           conf_dirs)
             sys.exit()
 
         with open(conf_file, 'r') as stream:
             conf = yaml.load(stream)
             for dpid, dconf in conf.items():
                 # Convert any strings into sensible lists
-                if type(dpid) is int:
+                if not isinstance(dpid, str):
                     self.conf[dpid] = {}
                     if dconf is None:
                         continue
@@ -135,7 +244,8 @@ class PatchPanel(app_manager.RyuApp):
         # Set some default config values
         self.conf.setdefault('saved_configs_dir', './configs/')
 
-        self.log.debug("Loaded configuration: %s", self.conf)
+        self.log.debug("Loaded configuration:")
+        self.log.debug(pprint.pformat(self.conf))
 
         # Reload connected switches, which will also clear non-managed switches
         for i, dp in self.dpset.get_all():
@@ -150,7 +260,7 @@ class PatchPanel(app_manager.RyuApp):
             os.makedirs(self.conf['saved_configs_dir'])
         except Exception as e:
             self.log.error("Failed to create directory for saved configs %s, reason: %s",
-                    self.conf['saved_configs_dir'], e)
+                           self.conf['saved_configs_dir'], e)
 
     def add_flow(self, datapath, priority, match, actions):
         ofproto = datapath.ofproto
@@ -160,6 +270,30 @@ class PatchPanel(app_manager.RyuApp):
         mod = parser.OFPFlowMod(datapath=datapath, priority=priority,
                                 match=match, instructions=inst,
                                 cookie=self.COOKIE)
+        datapath.send_msg(mod)
+
+    def add_group(self, datapath, group_id, buckets):
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        # Try a OFPGC_ADD first, which should fail with an OFP_ERROR_MSG with
+        # OFPET_GROUP_MOD_FAILED type and OFPMMFC_METER_EXISTS code if the group
+        # already exists
+        mod = parser.OFPGroupMod(datapath=datapath, command=ofproto.OFPGC_ADD,
+                                 type_=ofproto.OFPGT_ALL, group_id=group_id,
+                                 buckets=buckets)
+        datapath.send_msg(mod)
+        # Try a OFPGC_MODIFY for the case the group already exists
+        mod = parser.OFPGroupMod(datapath=datapath, command=ofproto.OFPGC_MODIFY,
+                                 type_=ofproto.OFPGT_ALL, group_id=group_id,
+                                 buckets=buckets)
+        datapath.send_msg(mod)
+
+    def delete_group(self, datapath, group_id):
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        mod = parser.OFPGroupMod(command=ofproto.OFPGC_DELETE,
+                                 datapath=datapath, type_=ofproto.OFPGT_ALL,
+                                 group_id=group_id)
         datapath.send_msg(mod)
 
     def strict_del_flow(self, datapath, priority, match):
@@ -181,78 +315,168 @@ class PatchPanel(app_manager.RyuApp):
         """
         if dp.id in self.conf:
             self.log.info("Installing switch %d", dp.id)
+            self.datapaths[dp.id] = DPID(dp.id)
             parser = dp.ofproto_parser
             match = parser.OFPMatch()
             actions = []
             self.add_flow(dp, self.DROP_PRIORITY, match, actions)
-            # Get all the things
-            match = parser.OFPMatch()
-            req = parser.OFPFlowStatsRequest(
-                dp, cookie=self.COOKIE, cookie_mask=2**64-1)
+            self.log.debug("Requesting groups from %d", dp.id)
+            req = parser.OFPGroupDescStatsRequest(dp)
             dp.send_msg(req)
-            self.log.debug("Requesting flows from %d", dp.id)
         else:
             self.log.info("Not using datapath %d, deleting our flows", dp.id)
             ofproto = dp.ofproto
             parser = dp.ofproto_parser
-            mod = parser.OFPFlowMod(command=ofproto.OFPFC_DELETE,
-                                    datapath=dp,
-                                    cookie=self.COOKIE,
-                                    cookie_mask=2**64-1,
-                                    out_port=ofproto.OFPP_ANY,
-                                    out_group=ofproto.OFPG_ANY)
-            dp.send_msg(mod)
+            mods = []
+            mods.append(parser.OFPFlowMod(command=ofproto.OFPFC_DELETE,
+                                          datapath=dp,
+                                          cookie=self.COOKIE,
+                                          cookie_mask=2**64-1,
+                                          out_port=ofproto.OFPP_ANY,
+                                          out_group=ofproto.OFPG_ANY))
+            mods.append(parser.OFPGroupMod(command=ofproto.OFPGC_DELETE,
+                                           datapath=dp, type_=ofproto.OFPGT_ALL,
+                                           group_id=ofproto.OFPG_ALL))
+            for mod in mods:
+                dp.send_msg(mod)
+
+    def reconfigure_switch(self, dp):
+        if dp.id in self.conf:
+            ofproto = dp.ofproto
+            parser = dp.ofproto_parser
+            mods = []
+            mods.append(parser.OFPFlowMod(command=ofproto.OFPFC_DELETE,
+                                          datapath=dp,
+                                          cookie=self.COOKIE,
+                                          cookie_mask=2**64-1,
+                                          out_port=ofproto.OFPP_ANY,
+                                          out_group=ofproto.OFPG_ANY))
+            mods.append(parser.OFPGroupMod(command=ofproto.OFPGC_DELETE,
+                                           datapath=dp, type_=ofproto.OFPGT_ALL,
+                                           group_id=ofproto.OFPG_ALL))
+            for mod in mods:
+                dp.send_msg(mod)
+
+            if dp.id in self.datapaths:
+                for link in self.datapaths[dp.id].mappings:
+                    self.install_single_link(self.datapaths[dp.id], link)
 
     @set_ev_cls(dpset.EventDP, dpset.DPSET_EV_DISPATCHER)
     @handleException
     def switch_enter_exit(self, ev):
         dp = ev.dp
         if not ev.enter:
-            self.log.info("Switch exiting: %d", dp.id)
-            if dp.id in self.mappings:
-                del self.mappings[dp.id]
+            self.log.info("Switch exiting %d", dp.id)
+            if dp.id in self.datapaths:
+                del self.datapaths[dp.id]
             return
-        self.log.info("Switch entering: %d", dp.id)
+        self.log.info("Switch entering %d", dp.id)
         self.reload_switch(dp)
+
+    @set_ev_cls(ofp_event.EventOFPGroupDescStatsReply, MAIN_DISPATCHER)
+    @handleException
+    def group_desc_stats_reply_handler(self, ev):
+        parser = ev.msg.datapath.ofproto_parser
+        dp = ev.msg.datapath
+        self.log.debug("Received group description stats reply from %d", dp.id)
+        for stat in ev.msg.body:
+            self.datapaths[dp.id].buckets[stat.group_id] = stat.buckets
+        self.log.debug("Requesting flows from %d", dp.id)
+        req = parser.OFPFlowStatsRequest(
+            dp, cookie=self.COOKIE, cookie_mask=2**64-1)
+        dp.send_msg(req)
 
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     @handleException
     def flow_stats_reply_handler(self, ev):
         parser = ev.msg.datapath.ofproto_parser
-        dpid = ev.msg.datapath.id
-        self.log.debug("Received stats reply from %d", dpid)
-        for stat in ev.msg.body:
-            if ('in_port' in stat.match and
-               stat.priority == self.NORMAL_PRIORITY):
-                for actions in [x for x in stat.instructions
-                                if isinstance(x, parser.OFPInstructionActions)]:
-                    for action in [x for x in actions.actions
-                                   if isinstance(x, parser.OFPActionOutput)]:
-                        self.mappings[dpid][stat.match['in_port']].add(
-                            action.port)
+        dp = ev.msg.datapath
+        self.log.debug("Received flow stats reply from %d", dp.id)
+
+        in_ports = {}
+
+        flow_rules = [
+            x for x in ev.msg.body
+            if x.cookie == self.COOKIE
+            and x.priority in [self.NORMAL_PRIORITY, self.VLAN_PRIORITY]
+        ]
+
+        for flow_rule in flow_rules:
+            actions = next(
+                (x.actions for x in flow_rule.instructions
+                 if isinstance(x, parser.OFPInstructionActions))
+            )
+            group_actions = dict([
+                (x.group_id, self.datapaths[dp.id].buckets[x.group_id])
+                for x in actions
+                if isinstance(x, parser.OFPActionGroup)
+            ])
+            vlan_vid = -1
+            if 'vlan_vid' in flow_rule.match:
+                if (isinstance(flow_rule.match['vlan_vid'], tuple) and
+                        flow_rule.match['vlan_vid'] == (ofproto_v1_3.OFPVID_PRESENT,
+                                                        ofproto_v1_3.OFPVID_PRESENT)):
+                    vlan_vid = 0xFFF
+                elif flow_rule.match['vlan_vid'] == ofproto_v1_3.OFPVID_NONE:
+                    vlan_vid = 0
+                else:
+                    vlan_vid = flow_rule.match['vlan_vid'] ^ ofproto_v1_3.OFPVID_PRESENT
+            full_in_port = "%s.%s" % (flow_rule.match['in_port'], vlan_vid)
+            in_ports[full_in_port] = []
+            for group_id, buckets in group_actions.iteritems():
+                for bucket in buckets:
+                    output = next(
+                        (x.port for x in bucket.actions
+                         if isinstance(x, parser.OFPActionOutput)), None
+                    )
+                    set_vlan_vid = next(
+                        (x.value ^ ofproto_v1_3.OFPVID_PRESENT
+                         for x in bucket.actions
+                         if isinstance(x, parser.OFPActionSetField)
+                         and x.key == "vlan_vid"), -1
+                    )
+                    pop_vlan = next(
+                        (x for x in bucket.actions
+                         if isinstance(x, parser.OFPActionPopVlan)), None
+                    )
+                    if vlan_vid > 0:
+                        if pop_vlan:
+                            # VLAN -> Native
+                            full_output = "%s.%s" % (output, set_vlan_vid)
+                        elif set_vlan_vid > 0:
+                            # VLAN -> VLAN (rewritten)
+                            full_output = "%s.%s" % (output, set_vlan_vid)
+                        else:
+                            # VLAN -> VLAN
+                            full_output = "%s.%s" % (output, vlan_vid)
+                    else:
+                        # Native -> VLAN
+                        # Native -> Native
+                        full_output = "%s.%s" % (output, set_vlan_vid)
+                    in_ports[full_in_port].append(full_output)
+
+        # Make our links
+        for in_port, outputs in in_ports.iteritems():
+            # If both directions exist add a link
+            for output in outputs:
+                if output in in_ports:
+                    link = Link(Port(in_port), Port(output))
+                    self.log.debug("Adding link %s to %s", link, self.datapaths[dp.id])
+                    self.datapaths[dp.id].mappings.add(link)
+
+        default_conf_file = "default_" + str(dp.id)
+        default_conf_path = self.validate_path(self.conf['saved_configs_dir'],
+                                               default_conf_file)
+        if os.path.isfile(default_conf_path + ".yaml"):
+            self.log.debug("Loading default configuration for %s from %s",
+                           dp.id, default_conf_file)
+            self.load_conf(default_conf_file, False, "replace", dp.id)
+
         self.print_connections()
-        self.verify_connections()
 
     def print_connections(self):
-        for dpid, in_ports in self.mappings.iteritems():
-            self.log.debug("%d:", dpid)
-            for in_port, out_ports in in_ports.iteritems():
-                for out_port in out_ports:
-                    self.log.debug("\t %d -> %d", in_port, out_port)
-
-    def verify_connections(self):
-        good = True
-        for dpid, in_ports in self.mappings.iteritems():
-            for in_port, out_ports in in_ports.iteritems():
-                for out_port in out_ports:
-                    # Ensure we don't accidently add an extra item by default
-                    if (out_port not in self.mappings[dpid] or in_port
-                       not in self.mappings[dpid][out_port]):
-                        self.log.warning(
-                            "Error single direction mapping for %d -> %d",
-                            in_port, out_port)
-                        good = False
-        return good
+        for dpid, dp in self.datapaths.iteritems():
+            self.log.debug(dp)
 
     def get_friendly(self, dpid, port):
         proto = self.dpset.get(dpid).ofproto
@@ -303,43 +527,180 @@ class PatchPanel(app_manager.RyuApp):
             self.name_dpid(switch)
         return switches
 
-    def get_connections(self, dpid, port=None, mappings=None):
-        if not mappings:
-            mappings = self.mappings
-        l = []
+    def get_connections(self, dpid):
+        links = []
         dpids = self.parse_dpids(dpid)
         for dpid in dpids:
-            for in_port, out_ports in mappings[dpid].iteritems():
-                if port and in_port != port:
-                    continue
-                k = self.make_friendly({'port': in_port, 'dpid': str(dpid)})
-                vs = self.get_friendlys(dpid, out_ports)
-                res = [{'dpid': str(dpid), 'src': k, 'dst': x} for x in vs]
-                if len(res):
-                    l.extend(res)
-        return l
+            dp = self.datapaths[dpid]
+            for link in dp.mappings:
+                porta = self.make_friendly({
+                    'port': link.porta.number,
+                    'vlan': link.porta.vlan,
+                    'dpid': str(dp.id)
+                })
+                portb = self.make_friendly({
+                    'port': link.portb.number,
+                    'vlan': link.portb.vlan,
+                    'dpid': str(dp.id)
+                })
+                links.extend([
+                    {'dpid': str(dp.id), 'src': porta, 'dst': portb},
+                    {'dpid': str(dp.id), 'src': portb, 'dst': porta}
+                ])
+        return links
 
-    def install_single_link(self, dpid, in_port, out_port, add):
-        orig_len = len(self.mappings[dpid][in_port])
-        if add:
-            self.mappings[dpid][in_port].add(out_port)
-        else:
-            self.mappings[dpid][in_port].discard(out_port)
-        if orig_len != len(self.mappings[dpid][in_port]):
-            self.install_port(dpid, in_port)
-            return True
-        return False
+    def install_single_link(self, dp, link):
+        # Install link in both directions
+        for in_port in [link.porta, link.portb]:
+            self.install_port_rule(dp, in_port)
 
-    def install_port(self, dpid, port):
-        parser = self.dpset.get(dpid).ofproto_parser
-        match = parser.OFPMatch(in_port=port)
-        actions = [parser.OFPActionOutput(p) for p in self.mappings[dpid][port]]
-        if len(actions):
-            self.add_flow(self.dpset.get(dpid), self.NORMAL_PRIORITY,
-                          match, actions)
+    def remove_single_link(self, dp, link):
+        # Remove link in both directions
+        for in_port in [link.porta, link.portb]:
+            self.remove_port_rule(dp, in_port)
+
+    def install_port_rule(self, dp, port):
+        # Generates a group per port, each group contains a number of buckets
+        # for performing the correct action for each output port.
+        parser = self.dpset.get(dp.id).ofproto_parser
+        actions = []
+        buckets = []
+
+        if port.vlan > 0:
+            if port.vlan == 0xFFF:
+                vlan_match = (ofproto_v1_3.OFPVID_PRESENT,
+                              ofproto_v1_3.OFPVID_PRESENT)
+            else:
+                vlan_match = port.vlan|ofproto_v1_3.OFPVID_PRESENT
+
+            match = parser.OFPMatch(in_port=port.number,
+                                    vlan_vid=vlan_match)
+            priority = self.VLAN_PRIORITY
+
+            # VLAN -> Native
+            buckets.extend([
+                parser.OFPBucket(actions=[
+                    parser.OFPActionPopVlan(),
+                    parser.OFPActionOutput(l.portb.number)
+                ])
+                for l in dp.mappings
+                if l.porta.number == port.number
+                and l.porta.vlan == port.vlan
+                and l.portb.vlan == -1
+            ])
+            buckets.extend([
+                parser.OFPBucket(actions=[
+                    parser.OFPActionPopVlan(),
+                    parser.OFPActionOutput(l.porta.number)
+                ])
+                for l in dp.mappings
+                if l.portb.number == port.number
+                and l.portb.vlan == port.vlan
+                and l.porta.vlan == -1
+            ])
+
+            # VLAN -> VLAN
+            buckets.extend([
+                parser.OFPBucket(actions=[
+                    parser.OFPActionOutput(l.portb.number)
+                ])
+                for l in dp.mappings
+                if l.porta.number == port.number
+                and l.portb.vlan == port.vlan
+            ])
+            buckets.extend([
+                parser.OFPBucket(actions=[
+                    parser.OFPActionOutput(l.porta.number)
+                ])
+                for l in dp.mappings
+                if l.portb.number == port.number
+                and l.porta.vlan == port.vlan
+            ])
+
+            # VLAN -> VLAN (rewritten)
+            buckets.extend([
+                parser.OFPBucket(actions=[
+                    parser.OFPActionSetField(vlan_vid=l.portb.vlan|ofproto_v1_3.OFPVID_PRESENT),
+                    parser.OFPActionOutput(l.portb.number)
+                ])
+                for l in dp.mappings
+                if l.porta.number == port.number
+                and l.portb.vlan > 0
+                and l.portb.vlan < 0xFFF
+                and l.portb.vlan != port.vlan
+            ])
+            buckets.extend([
+                parser.OFPBucket(actions=[
+                    parser.OFPActionSetField(vlan_vid=l.porta.vlan|ofproto_v1_3.OFPVID_PRESENT),
+                    parser.OFPActionOutput(l.porta.number)
+                ])
+                for l in dp.mappings
+                if l.portb.number == port.number
+                and l.porta.vlan > 0
+                and l.porta.vlan < 0xFFF
+                and l.porta.vlan != port.vlan
+            ])
         else:
-            self.strict_del_flow(self.dpset.get(dpid), self.NORMAL_PRIORITY,
-                                 match)
+            if port.vlan == 0:
+                vlan_match = ofproto_v1_3.OFPVID_NONE
+                match = parser.OFPMatch(in_port=port.number, vlan_vid=vlan_match)
+            else:
+                match = parser.OFPMatch(in_port=port.number)
+
+            priority = self.NORMAL_PRIORITY
+
+            # Native -> Native
+            buckets.extend([
+                parser.OFPBucket(actions=[
+                    parser.OFPActionOutput(l.portb.number)
+                ])
+                for l in dp.mappings
+                if l.porta.number == port.number
+                and l.porta.vlan == port.vlan
+                and (l.portb.vlan == -1 or l.portb.vlan == 0)
+            ])
+            buckets.extend([
+                parser.OFPBucket(actions=[parser.OFPActionOutput(l.porta.number)])
+                for l in dp.mappings
+                if l.portb.number == port.number
+                and l.portb.vlan == port.vlan
+                and (l.porta.vlan == -1 or l.porta.vlan == 0)
+            ])
+
+            # Native -> VLAN
+            buckets.extend([
+                parser.OFPBucket(actions=[
+                    parser.OFPActionPushVlan(ether.ETH_TYPE_8021Q),
+                    parser.OFPActionSetField(vlan_vid=l.portb.vlan|ofproto_v1_3.OFPVID_PRESENT),
+                    parser.OFPActionOutput(l.portb.number)
+                ])
+                for l in dp.mappings
+                if l.porta.number == port.number
+                and l.portb.vlan > 0
+                and l.portb.vlan < 0xFFF
+            ])
+            buckets.extend([
+                parser.OFPBucket(actions=[
+                    parser.OFPActionPushVlan(ether.ETH_TYPE_8021Q),
+                    parser.OFPActionSetField(vlan_vid=l.porta.vlan|ofproto_v1_3.OFPVID_PRESENT),
+                    parser.OFPActionOutput(l.porta.number)
+                ])
+                for l in dp.mappings
+                if l.portb.number == port.number
+                and l.porta.vlan > 0
+                and l.porta.vlan < 0xFFF
+            ])
+
+        actions = [parser.OFPActionGroup(port.number)]
+
+        self.add_group(self.dpset.get(dp.id), port.number, buckets)
+        self.add_flow(self.dpset.get(dp.id), priority, match, actions)
+
+    def remove_port_rule(self, dp, port):
+        parser = self.dpset.get(dp.id).ofproto_parser
+        match = parser.OFPMatch(in_port=port.number)
+        self.strict_del_flow(self.dpset.get(dp.id), self.NORMAL_PRIORITY, match)
+        self.delete_group(self.dpset.get(dp.id), port.number)
 
     def validate_dpid(self, dpid):
         return dpid in self.conf and self.dpset.get(dpid) is not None
@@ -355,7 +716,7 @@ class PatchPanel(app_manager.RyuApp):
         dpids = []
         if dpid == "" or dpid is None:
             dpids = [x[0] for x in self.dpset.get_all()]
-        elif type(dpid) is set:
+        elif isinstance(dpid, set):
             dpids = dpid
         else:
             try:
@@ -364,44 +725,68 @@ class PatchPanel(app_manager.RyuApp):
                 pass
         return [x for x in dpids if self.validate_dpid(x)]
 
-    def get_ports(self, dpid="", mappings=None):
-        if not mappings:
-            mappings = self.mappings
+    def get_ports(self, dpid="", datapaths=None):
+        if not datapaths:
+            datapaths = self.datapaths
         dpids = self.parse_dpids(dpid)
         all_ports = []
         for dpid in dpids:
-            proto = self.dpset.get(dpid).ofproto
-            ports = self.dpset.get_ports(dpid)
+            dp = datapaths[dpid]
+            proto = self.dpset.get(dp.id).ofproto
+            ports = self.dpset.get_ports(dp.id)
             ports = [x.port_no for x in ports if (x.state == 0
                      or x.state == proto.OFPPS_LINK_DOWN) and x.config == 0]
             ports = self.get_friendlys(dpid, ports)
             for port in ports:
-                port['links'] = list(mappings[dpid][port['port']])
-                port['curr_speed'] = self.dpset.get_port(dpid, port['port']).curr_speed
+                port['links'] = []
+                port['links'].extend([
+                    str(l.portb)
+                    for l in dp.mappings
+                    if l.porta.number == port['port']
+                ])
+                port['links'].extend([
+                    str(l.porta)
+                    for l in dp.mappings
+                    if l.portb.number == port['port']
+                ])
+                port['curr_speed'] = self.dpset.get_port(dp.id, port['port']).curr_speed
             all_ports.extend(ports)
         return all_ports
 
-    def add_link(self, dpid, portA, portB):
-        dpid = self.parse_dpid(dpid)
-        self.install_single_link(dpid, portA, portB, True)
-        self.install_single_link(dpid, portB, portA, True)
+    def add_link(self, dpid, link):
+        dp = self.datapaths[self.parse_dpid(dpid)]
+        self.log.debug("Adding link %s to %s", link, dp)
+        if link not in dp.mappings:
+            dp.mappings.add(link)
+            self.install_single_link(dp, link)
+        else:
+            self.log.error("Link %s is already present in %s", link, dp)
 
-    def remove_link(self, dpid, portA, portB):
-        dpid = self.parse_dpid(dpid)
-        self.install_single_link(dpid, portA, portB, False)
-        self.install_single_link(dpid, portB, portA, False)
+    def remove_link(self, dpid, link):
+        dp = self.datapaths[self.parse_dpid(dpid)]
+        self.log.debug("Removing link %s from %s", link, dp)
+        if link in dp.mappings:
+            self.remove_single_link(dp, link)
+            dp.mappings.remove(link)
+        else:
+            self.log.error("Link %s is not in %s", link, dp)
 
     def remove_port(self, dpid, port):
-        dpid = self.parse_dpid(dpid)
+        dp = self.datapaths[self.parse_dpid(dpid)]
         # Remove all references to a particular port
-        if len(self.mappings[dpid][port]):
-            # Add one then remove it, this will install a drop rule
-            self.mappings[dpid][port] = set([1])
-            self.install_single_link(dpid, port, 1, False)
+        self.log.debug("Removing port %s from %s", port, dp)
+        self.remove_port_rule(dp, Port(port))
 
         # Do opposite - NOP if we do nothing
-        for in_port in self.mappings[dpid]:
-            self.install_single_link(dpid, in_port, port, False)
+        links = [
+            l for l in dp.mappings
+            if l.porta.number == port
+            or l.portb.number == port
+        ]
+        for link in links:
+            self.log.debug("Removing link %s from %s", link, dp)
+            self.remove_single_link(dp, link)
+            dp.mappings.remove(link)
         return True
 
     def get_configs(self):
@@ -409,38 +794,42 @@ class PatchPanel(app_manager.RyuApp):
         configs = [c.split("/")[-1][0:-5] for c in configs]
         return configs
 
-    def emulate_conf(self, yaml, merge="replace_all", dpid=""):
-        dpids = self.parse_dpids(dpid)
-        if merge == "replace_all":
-            nconf = defaultdict(lambda: defaultdict(set))
-            for dpid, data in self.mappings.iteritems():
-                if dpid not in dpids:
-                    nconf[dpid] = copy.deepcopy(self.mappings[dpid])
-        elif merge == "combine":
-            nconf = copy.deepcopy(self.mappings)
-        elif merge == "replace_ports":
-            nconf = copy.deepcopy(self.mappings)
-            for dpid, dconf in yaml.items():
-                if dpid in dpids:
-                    for l, r in dconf.iteritems():
-                        for i in nconf[dpid][l]:
-                            nconf[dpid][i].discard(l)
-                        del nconf[dpid][l]
+    def emulate_conf(self, config, merge="replace", dpid=""):
+        if merge == "replace":
+            emulated_datapaths = {}
+            for dpid, ports in config.iteritems():
+                datapath = DPID(dpid)
+                for src, dests in ports.iteritems():
+                    src_port = Port(src)
+                    for dst in dests:
+                        dst_port = Port(dst)
+                        datapath.mappings.add(Link(src_port, dst_port))
+                emulated_datapaths[dpid] = datapath
+        elif merge == "merge":
+            emulated_datapaths = copy.deepcopy(self.datapaths)
+            for dpid, ports in config.iteritems():
+                for src, dests in ports.iteritems():
+                    src_port = Port(src)
+                    for dst in dests:
+                        dst_port = Port(dst)
+                        emulated_datapaths[dpid].mappings.add(Link(src_port, dst_port))
+        elif merge == "merge_exclusive":
+            emulated_datapaths = copy.deepcopy(self.datapaths)
+            for dpid, ports in config.iteritems():
+                for src, dests in ports.iteritems():
+                    src_port = Port(src)
+                    links = [
+                        l for l in emulated_datapaths[dpid].mappings
+                        if l.porta.number == src_port.number
+                        or l.portb.number == src_port.number
+                    ]
+                    for link in links:
+                        emulated_datapaths[dpid].mappings.remove(link)
+                    for dst in dests:
+                        dst_port = Port(dst)
+                        emulated_datapaths[dpid].mappings.add(Link(src_port, dst_port))
 
-        for dpid, dconf in yaml.items():
-            if dpid in dpids:
-                for l, r in dconf.iteritems():
-                    nconf[dpid][l].update(self.expand_ranges(r))
-        return nconf
-
-    def swap_mappings(self, new):
-        """ Swap the existing mappings with a new set """
-        for dpid, conf in self.mappings.iteritems():
-            for port, ports in conf.iteritems():
-                if new[dpid][port] != ports:
-                    ports.clear()
-                    ports.update(new[dpid][port])
-                    self.install_port(dpid, port)
+        return emulated_datapaths
 
     def validate_path(self, base, name):
         path = os.path.join(base, name)
@@ -449,26 +838,32 @@ class PatchPanel(app_manager.RyuApp):
             return path
         raise ValueError("Invalid Path")
 
-    def load_conf(self, name, simulate, merge="replace_all", dpid=""):
+    def load_conf(self, name, simulate, merge="replace", dpid=""):
         name = self.validate_path(self.conf['saved_configs_dir'], name + ".yaml")
         with open(name, 'r') as stream:
             conf = yaml.load(stream)
             new = self.emulate_conf(conf, merge, dpid)
             if simulate:
-                return self.get_ports(dpid=dpid, mappings=new)
+                return self.get_ports(dpid=dpid, datapaths=new)
             else:
-                self.swap_mappings(new)
+                self.datapaths = new
+                for i, dp in self.dpset.get_all():
+                    self.reconfigure_switch(dp)
                 return self.get_ports()
 
     def save_conf(self, name):
         name = self.validate_path(self.conf['saved_configs_dir'], name + ".yaml")
         data = {}
-        print self.mappings
-        for dpid, dconf in self.mappings.iteritems():
-            data[dpid] = {}
-            for l, r in dconf.iteritems():
-                if len(r):
-                    data[dpid][l] = list(r)
+        for dpid, dp in self.datapaths.iteritems():
+            data[dp.id] = {}
+            for link in dp.mappings:
+                data[dp.id].setdefault(link.porta.serialized(), set())
+                data[dp.id].setdefault(link.portb.serialized(), set())
+                data[dp.id][link.porta.serialized()].add(link.portb.serialized())
+                data[dp.id][link.portb.serialized()].add(link.porta.serialized())
+            for port, outputs in data[dp.id].iteritems():
+                data[dp.id][port] = list(outputs)
+        self.log.debug(data)
 
         with open(name, 'w') as stream:
             stream.write(yaml.dump(data, default_flow_style=False))
@@ -507,8 +902,15 @@ class WebFace(ControllerBase):
         if req.body:
             args = json.loads(req.body)
         try:
-            args['dpid'] = int(args['dpid'])
-            self.app.add_link(**args)
+            porta = Port(args['porta'])
+            portb = Port(args['portb'])
+            # Add VLAN tag information if we have it
+            if 'porta.vlan_vid' in args and isinstance(args['porta.vlan_vid'], int):
+                porta.vlan = args['porta.vlan_vid']
+            if 'portb.vlan_vid' in args and isinstance(args['portb.vlan_vid'], int):
+                portb.vlan = args['portb.vlan_vid']
+            link = Link(porta, portb)
+            self.app.add_link(args['dpid'], link)
             return Response(content_type='application/json',
                             body=json.dumps(True))
         except:
@@ -532,7 +934,15 @@ class WebFace(ControllerBase):
         if req.body:
             args = json.loads(req.body)
         try:
-            self.app.remove_link(**args)
+            porta = Port(args['porta'])
+            portb = Port(args['portb'])
+            # Add VLAN tag information if we have it
+            if 'porta.vlan_vid' in args and isinstance(args['porta.vlan_vid'], int):
+                porta.vlan = args['porta.vlan_vid']
+            if 'portb.vlan_vid' in args and isinstance(args['portb.vlan_vid'], int):
+                portb.vlan = args['portb.vlan_vid']
+            link = Link(porta, portb)
+            self.app.remove_link(args['dpid'], link)
             return Response(content_type='application/json',
                             body=json.dumps(True))
         except:

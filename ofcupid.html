@@ -34,7 +34,8 @@
     <table class="table table-condensed table-bordered table-hover">
       <thead>
         <tr>
-          <th></th>
+          <th>Link</th>
+          <th>VLAN</th>
           <th ng-hide="dpid !== ''">Switch</th>
           <th>Port</th>
           <th>Link Speed</th>
@@ -48,9 +49,16 @@
         ng-class="{success: sel.indexOf(port) !== -1,
         active: isDisabled(port),
         info: isConnected(port)}">
-        <td><input type="checkbox"
-          ng-checked="sel.indexOf(port) !== -1"
-          ng-disabled="isDisabled(port)||isConnected(port)" ></td>
+        <td>
+          <input type="checkbox"
+            ng-checked="sel.indexOf(port) !== -1"
+            ng-disabled="isDisabled(port)||isConnected(port)">
+        </td>
+        <td>
+          <input type="text" class="form-inline"
+            placeholder="VLAN ID"
+            ng-model="port.vlan_vid" ng-pattern="/^[0-9]{0,4}$/">
+        </td>
         <td ng-hide="dpid !== ''">{{ port.dpid_name }}</td>
         <td>{{port | print_port}}</td>
         <td>{{ port.curr_speed | kbits }}</td>
@@ -62,7 +70,7 @@
 
     <div class="form-group">
       <button class="btn btn-primary" ng-click="install_link()" ng-disabled="sel.length !== 2">Link</button>
-      <button class="btn btn-danger" ng-click="unlink_port()" ng-disabled="sel.length !== 1">Delete Associated Links</button></br>
+      <button class="btn btn-danger" ng-click="unlink_port()" ng-disabled="sel.length !== 1">Delete All Associated Links</button></br>
     </div>
 
     <div class="form-group form-inline">
@@ -74,16 +82,16 @@
       </label>
       <form name="buttons" class="radio">
         <label>
-          <input type="radio" ng-model="merge" value="replace_all" ng-change="select_conf()" >
-          Replace All
+          <input type="radio" ng-model="merge" value="replace" ng-change="select_conf()" >
+          Replace all (?)
         </label>
         <label>
-          <input type="radio" ng-model="merge" value="replace_ports" ng-change="select_conf()" >
-          Replace Ports
+          <input type="radio" ng-model="merge" value="merge" ng-change="select_conf()" >
+          Merge (?)
         </label>
         <label>
-          <input type="radio" ng-model="merge" value="combine" ng-change="select_conf()" >
-          Merge
+          <input type="radio" ng-model="merge" value="merge_exclusive" ng-change="select_conf()" >
+          Exclusive Merge (?)
         </label>
       </form>
       <button class="btn btn-primary" ng-disabled='userChoice == false' ng-click="load_conf()">Load</button></br>
@@ -118,7 +126,9 @@
           <th></th>
           <th ng-hide="dpid !== ''">Switch</th>
           <th>Source Port</th>
+          <th>Source VLAN</th>
           <th>Destination Port</th>
+          <th>Destination VLAN</th>
         </tr>
       </thead>
       <tr ng-repeat="link in links | filter:f_reverse | filter:fil1 | filter:fil2 |
@@ -128,7 +138,9 @@
         <td><input type="checkbox" ng-checked="link.selected" ></td>
         <td ng-hide="dpid !== ''">{{(link.src.dpid_name)}}</td>
         <td>{{link.src | print_port}}</td>
+        <td>{{link.src | print_vlan}}</td>
         <td>{{link.dst | print_port}}</td>
+        <td>{{link.dst | print_vlan}}</td>
       </tr>
     </table>
 
