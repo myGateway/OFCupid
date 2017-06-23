@@ -154,6 +154,7 @@ class PatchPanel(app_manager.RyuApp):
     _CONTEXTS = {'wsgi': WSGIApplication, 'dpset': dpset.DPSet}
     DROP_PRIORITY = 1000
     NORMAL_PRIORITY = 2000
+    TAGGED_PRIORITY = 2500
     VLAN_PRIORITY = 3000
     COOKIE = 0x42
     datapaths = {}
@@ -398,7 +399,8 @@ class PatchPanel(app_manager.RyuApp):
         flow_rules = [
             x for x in ev.msg.body
             if x.cookie == self.COOKIE
-            and x.priority in [self.NORMAL_PRIORITY, self.VLAN_PRIORITY]
+            and x.priority in [self.NORMAL_PRIORITY, self.TAGGED_PRIORITY,
+                               self.VLAN_PRIORITY]
         ]
 
         for flow_rule in flow_rules:
@@ -570,12 +572,13 @@ class PatchPanel(app_manager.RyuApp):
             if port.vlan == 0xFFF:
                 vlan_match = (ofproto_v1_3.OFPVID_PRESENT,
                               ofproto_v1_3.OFPVID_PRESENT)
+                priority = self.TAGGED_PRIORITY
             else:
                 vlan_match = port.vlan|ofproto_v1_3.OFPVID_PRESENT
+                priority = self.VLAN_PRIORITY
 
             match = parser.OFPMatch(in_port=port.number,
                                     vlan_vid=vlan_match)
-            priority = self.VLAN_PRIORITY
 
             # VLAN -> Native
             buckets.extend([
@@ -644,10 +647,10 @@ class PatchPanel(app_manager.RyuApp):
             if port.vlan == 0:
                 vlan_match = ofproto_v1_3.OFPVID_NONE
                 match = parser.OFPMatch(in_port=port.number, vlan_vid=vlan_match)
+                priority = self.TAGGED_PRIORITY
             else:
                 match = parser.OFPMatch(in_port=port.number)
-
-            priority = self.NORMAL_PRIORITY
+                priority = self.NORMAL_PRIORITY
 
             # Native -> Native
             buckets.extend([
