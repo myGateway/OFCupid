@@ -105,6 +105,39 @@ class Port(object):
             return "{}.{}".format(self.number, self.vlan)
         return str(self.number)
 
+    def get_group_id(self):
+        """ Returns the unique OF group ID for this port
+
+            OF groups are 32-bit
+            As such encode port [31-13]
+            and vlan(+1, avoid overflow with -1) [12-0]
+        """
+        return (self.number<<13) - 1 + self.vlan
+
+    def get_priority(self):
+        """ Returns the priority that this Port should be installed at """
+        if self.vlan == -1:
+            return PatchPanel.NORMAL_PRIORITY
+        elif self.vlan == 0 or self.vlan == 0xFFF:
+            return PatchPanel.TAGGED_PRIORITY
+        elif self.vlan > 0 and self.vlan < 0xFFF:
+            return PatchPanel.VLAN_PRIORITY
+
+    def get_of_match(self, parser):
+        """ Returns the OpenFlow match for this Port """
+        if self.vlan == -1:
+            return parser.OFPMatch(in_port=self.number)
+        elif self.vlan == 0:
+            vlan_match = ofproto_v1_3.OFPVID_NONE
+        elif self.vlan == 0xFFF:
+            vlan_match = (ofproto_v1_3.OFPVID_PRESENT,
+                          ofproto_v1_3.OFPVID_PRESENT)
+        elif self.vlan > 0 and self.vlan < 0xFFF:
+            vlan_match = self.vlan|ofproto_v1_3.OFPVID_PRESENT
+        else:
+            raise ValueError("get_of_match: Port has an invalid VLAN")
+        return parser.OFPMatch(in_port=self.number, vlan_vid=vlan_match)
+
     number = property(get_number, set_number)
     vlan = property(get_vlan, set_vlan)
 
@@ -569,16 +602,6 @@ class PatchPanel(app_manager.RyuApp):
         buckets = []
 
         if port.vlan > 0:
-            if port.vlan == 0xFFF:
-                vlan_match = (ofproto_v1_3.OFPVID_PRESENT,
-                              ofproto_v1_3.OFPVID_PRESENT)
-                priority = self.TAGGED_PRIORITY
-            else:
-                vlan_match = port.vlan|ofproto_v1_3.OFPVID_PRESENT
-                priority = self.VLAN_PRIORITY
-
-            match = parser.OFPMatch(in_port=port.number,
-                                    vlan_vid=vlan_match)
 
             # VLAN -> Native, VLAN -> Untagged, Tagged -> Native, Tagged -> Untagged
             buckets.extend([
@@ -587,7 +610,7 @@ class PatchPanel(app_manager.RyuApp):
                     parser.OFPActionOutput(l.portb.number)
                 ])
                 for l in dp.mappings
-                if l.porta.number == port.number
+                if l.porta == port
                 and l.porta.vlan == port.vlan
                 and (l.portb.vlan == -1 or l.portb.vlan == 0)
             ])
@@ -597,7 +620,7 @@ class PatchPanel(app_manager.RyuApp):
                     parser.OFPActionOutput(l.porta.number)
                 ])
                 for l in dp.mappings
-                if l.portb.number == port.number
+                if l.portb == port
                 and l.portb.vlan == port.vlan
                 and (l.porta.vlan == -1 or l.porta.vlan == 0)
             ])
@@ -608,7 +631,7 @@ class PatchPanel(app_manager.RyuApp):
                     parser.OFPActionOutput(l.portb.number)
                 ])
                 for l in dp.mappings
-                if l.porta.number == port.number
+                if l.porta == port
                 and l.portb.vlan == port.vlan
             ])
             buckets.extend([
@@ -616,7 +639,7 @@ class PatchPanel(app_manager.RyuApp):
                     parser.OFPActionOutput(l.porta.number)
                 ])
                 for l in dp.mappings
-                if l.portb.number == port.number
+                if l.portb == port
                 and l.porta.vlan == port.vlan
             ])
 
@@ -627,7 +650,7 @@ class PatchPanel(app_manager.RyuApp):
                     parser.OFPActionOutput(l.portb.number)
                 ])
                 for l in dp.mappings
-                if l.porta.number == port.number
+                if l.porta == port
                 and l.portb.vlan > 0
                 and l.portb.vlan < 0xFFF
                 and l.portb.vlan != port.vlan
@@ -638,35 +661,27 @@ class PatchPanel(app_manager.RyuApp):
                     parser.OFPActionOutput(l.porta.number)
                 ])
                 for l in dp.mappings
-                if l.portb.number == port.number
+                if l.portb == port
                 and l.porta.vlan > 0
                 and l.porta.vlan < 0xFFF
                 and l.porta.vlan != port.vlan
             ])
             # !!! Not Handled: VLAN -> Tagged !!!
         else:
-            if port.vlan == 0:
-                vlan_match = ofproto_v1_3.OFPVID_NONE
-                match = parser.OFPMatch(in_port=port.number, vlan_vid=vlan_match)
-                priority = self.TAGGED_PRIORITY
-            else:
-                match = parser.OFPMatch(in_port=port.number)
-                priority = self.NORMAL_PRIORITY
-
             # Native -> Native, Native -> Untagged, Untagged -> Native, Untagged -> Native
             buckets.extend([
                 parser.OFPBucket(actions=[
                     parser.OFPActionOutput(l.portb.number)
                 ])
                 for l in dp.mappings
-                if l.porta.number == port.number
+                if l.porta == port
                 and l.porta.vlan == port.vlan
                 and (l.portb.vlan == -1 or l.portb.vlan == 0)
             ])
             buckets.extend([
                 parser.OFPBucket(actions=[parser.OFPActionOutput(l.porta.number)])
                 for l in dp.mappings
-                if l.portb.number == port.number
+                if l.portb == port
                 and l.portb.vlan == port.vlan
                 and (l.porta.vlan == -1 or l.porta.vlan == 0)
             ])
@@ -679,7 +694,7 @@ class PatchPanel(app_manager.RyuApp):
                     parser.OFPActionOutput(l.portb.number)
                 ])
                 for l in dp.mappings
-                if l.porta.number == port.number
+                if l.porta == port
                 and l.portb.vlan > 0
                 and l.portb.vlan < 0xFFF
             ])
@@ -690,22 +705,22 @@ class PatchPanel(app_manager.RyuApp):
                     parser.OFPActionOutput(l.porta.number)
                 ])
                 for l in dp.mappings
-                if l.portb.number == port.number
+                if l.portb == port
                 and l.porta.vlan > 0
                 and l.porta.vlan < 0xFFF
             ])
             # !!! Not handled: Native -> Tagged,  Untagged -> Tagged !!!
 
-        actions = [parser.OFPActionGroup(port.number)]
+        actions = [parser.OFPActionGroup(port.get_group_id())]
 
-        self.add_group(self.dpset.get(dp.id), port.number, buckets)
-        self.add_flow(self.dpset.get(dp.id), priority, match, actions)
+        self.add_group(self.dpset.get(dp.id), port.get_group_id(), buckets)
+        self.add_flow(self.dpset.get(dp.id), port.get_priority(), port.get_of_match(parser), actions)
 
     def remove_port_rule(self, dp, port):
         parser = self.dpset.get(dp.id).ofproto_parser
-        match = parser.OFPMatch(in_port=port.number)
-        self.strict_del_flow(self.dpset.get(dp.id), self.NORMAL_PRIORITY, match)
-        self.delete_group(self.dpset.get(dp.id), port.number)
+        match = port.get_of_match(parser)
+        self.strict_del_flow(self.dpset.get(dp.id), port.get_priority(), match)
+        self.delete_group(self.dpset.get(dp.id), port.get_group_id())
 
     def validate_dpid(self, dpid):
         return dpid in self.conf and self.dpset.get(dpid) is not None
