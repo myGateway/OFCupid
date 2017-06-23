@@ -40,6 +40,7 @@ def handleException(func):
             os._exit(-1)
     return handler
 
+
 class DPID(object):
     def __init__(self, dpid):
         self.id = int(dpid)
@@ -73,6 +74,9 @@ class Link(object):
         if not isinstance(other, Link):
             return NotImplemented
         return self != other
+
+    def __contains__(self, item):
+        return item == self.porta or item == self.portb
 
 
 class Port(object):
@@ -590,9 +594,25 @@ class PatchPanel(app_manager.RyuApp):
             self.install_port_rule(dp, in_port)
 
     def remove_single_link(self, dp, link):
-        # Remove link in both directions
-        for in_port in [link.porta, link.portb]:
-            self.remove_port_rule(dp, in_port)
+        # Are we the only reference to this port?
+        count_a = len([l for l in dp.mappings if link.porta in l])
+        count_b = len([l for l in dp.mappings if link.portb in l])
+
+        assert count_a > 0 and count_b > 0
+        # Remove our link
+        dp.mappings.remove(link)
+
+        if count_a > 1:
+            # Other references still exist, so we reinstall the port
+            self.install_port_rule(dp, link.porta)
+        else:
+            self.remove_port_rule(dp, link.porta)
+
+        if count_b > 1:
+            # Other references still exist, so we reinstall the port
+            self.install_port_rule(dp, link.portb)
+        else:
+            self.remove_port_rule(dp, link.portb)
 
     def install_port_rule(self, dp, port):
         # Generates a group per port, each group contains a number of buckets
@@ -787,7 +807,6 @@ class PatchPanel(app_manager.RyuApp):
         self.log.debug("Removing link %s from %s", link, dp)
         if link in dp.mappings:
             self.remove_single_link(dp, link)
-            dp.mappings.remove(link)
         else:
             self.log.error("Link %s is not in %s", link, dp)
 
@@ -795,7 +814,6 @@ class PatchPanel(app_manager.RyuApp):
         dp = self.datapaths[self.parse_dpid(dpid)]
         # Remove all references to a particular port
         self.log.debug("Removing port %s from %s", port, dp)
-        self.remove_port_rule(dp, Port(port))
 
         # Do opposite - NOP if we do nothing
         links = [
@@ -806,7 +824,6 @@ class PatchPanel(app_manager.RyuApp):
         for link in links:
             self.log.debug("Removing link %s from %s", link, dp)
             self.remove_single_link(dp, link)
-            dp.mappings.remove(link)
         return True
 
     def get_configs(self):
