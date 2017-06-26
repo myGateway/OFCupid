@@ -24,7 +24,7 @@
       </label>
       <div class="navbar-right container-fluid">
         <div class="navbar-header">
-		<a class="navbar-brand clickable" ng-click="refresh()" href><h2 class="no-margin">&#8635;</h2></a>
+	  <a class="navbar-brand clickable" ng-click="refresh()" href><h2 class="no-margin">&#8635;</h2></a>
         </div>
       </div>
     </div>
@@ -55,9 +55,13 @@
             ng-disabled="isDisabled(port)||isConnected(port)">
         </td>
         <td>
-          <input type="text" class="form-inline"
+          <input ng-form="vlaninput" type="text" class="form-inline"
             placeholder="VLAN ID"
-            ng-model="port.vlan_vid" ng-pattern="/^[0-9]{0,4}$/">
+            ng-model="port.vlan_vid"
+            ng-init="port.valid = true"
+            ng-change="port.valid = vlaninput.$valid"
+            ng-pattern="/^(|-1|[0-9]|[1-8][0-9]|9[0-9]|[1-8][0-9]{2}|9[0-8][0-9]|99[0-9]|[1-3][0-9]{3}|40[0-8][0-9]|409[0-5])$/"
+        >
         </td>
         <td ng-hide="dpid !== ''">{{ port.dpid_name }}</td>
         <td>{{port | print_port}}</td>
@@ -69,7 +73,8 @@
     <p><small>Press Control or Shift while selecting items to only select 1 at a time</small></p>
 
     <div class="form-group">
-      <button class="btn btn-primary" ng-click="install_link()" ng-disabled="sel.length !== 2">Link</button>
+      <button class="btn btn-primary" ng-click="install_link()"
+           ng-disabled="sel.length !== 2 || !sel[0].valid || !sel[1].valid">Link</button>
       <button class="btn btn-danger" ng-click="unlink_port()" ng-disabled="sel.length !== 1">Delete All Associated Links</button></br>
     </div>
 
@@ -83,7 +88,7 @@
       <form name="buttons" class="radio">
         <label>
           <input type="radio" ng-model="merge" value="replace" ng-change="select_conf()" >
-	  Replace all<sup title="Replaces all existing links with those loaded from the configuration file.">?</sup>
+          Replace all<sup title="Replaces all existing links with those loaded from the configuration file.">?</sup>
         </label>
         <label>
           <input type="radio" ng-model="merge" value="merge" ng-change="select_conf()" >

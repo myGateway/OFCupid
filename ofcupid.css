@@ -10,3 +10,6 @@
 .clickable {
 	cursor: pointer;
 }
+.ng-invalid {
+	color: orange;
+}

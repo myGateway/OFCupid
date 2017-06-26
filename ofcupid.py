@@ -102,7 +102,11 @@ class Port(object):
         return self._vlan_vid
 
     def set_vlan(self, vlan):
-        self._vlan_vid = int(vlan)
+        vlan = int(vlan)
+        if vlan >= -1 and vlan <= 4095:
+            self._vlan_vid = int(vlan)
+        else:
+            raise ValueError("VLAN must be between -1 and 4095")
 
     def serialized(self):
         if self.vlan >= 0:
