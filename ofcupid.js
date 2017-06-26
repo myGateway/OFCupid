@@ -301,8 +301,8 @@ var linksController = function ($scope, $http, $rootScope, $log) {
   $scope.refresh();
 
   $scope.compare_items = function(a,b) {
-    if ((a.src.port === b.src.port && a.src.vlan === b.src.vlan && a.dst.port === b.dst.port && a.dst.vlan === b.dst.vlan) ||
-        (a.dst.port === b.src.port && a.dst.vlan === b.src.vlan && a.src.port === b.dst.port && a.src.vlan === b.dst.vlan)) {
+    if ((a.src.port === b.src.port && a.src.vlan === b.src.vlan && a.dst.port === b.dst.port && a.dst.vlan === b.dst.vlan && a.dpid === b.dpid) ||
+        (a.dst.port === b.src.port && a.dst.vlan === b.src.vlan && a.src.port === b.dst.port && a.src.vlan === b.dst.vlan && a.dpid === b.dpid)) {
           return true;
         }
     return false;
