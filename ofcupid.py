@@ -866,6 +866,12 @@ class PatchPanel(app_manager.RyuApp):
                         dst_port = Port(dst)
                         emulated_datapaths[dpid].mappings.add(Link(src_port, dst_port))
 
+        # If the configuration file is missing this switch, leave it untouched
+        # Or if we have limited to a single switch include the others
+        for dpid in self.datapaths:
+            if dpid not in emulated_datapaths:
+                emulated_datapaths[dpid] = copy.deepcopy(self.datapaths[dpid])
+
         return emulated_datapaths
 
     def validate_path(self, base, name):
