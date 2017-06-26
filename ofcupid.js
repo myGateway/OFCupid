@@ -27,13 +27,13 @@ app.filter('print_vlan', function() {
     return function(port) {
         switch(port.vlan) {
             case -1:
-                return "All including untagged"
+                return "Any incl. untagged"
                 break;
             case 0:
-                return "None"
+                return "Untagged"
                 break;
             case 0xFFF:
-                return "All"
+                return "Tagged"
                 break;
             default:
                 return port.vlan;
