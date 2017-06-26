@@ -83,15 +83,15 @@
       <form name="buttons" class="radio">
         <label>
           <input type="radio" ng-model="merge" value="replace" ng-change="select_conf()" >
-          Replace all (?)
+	  Replace all<sup title="Replaces all existing links with those loaded from the configuration file.">?</sup>
         </label>
         <label>
           <input type="radio" ng-model="merge" value="merge" ng-change="select_conf()" >
-          Merge (?)
+          Merge<sup title="Merges the links loaded from the configuration file with the currently installed links.">?</sup>
         </label>
         <label>
           <input type="radio" ng-model="merge" value="merge_exclusive" ng-change="select_conf()" >
-          Exclusive Merge (?)
+          Exclusive Merge<sup title="If a port is included in the configuration its links are removed and replaced with those from the configuration file, otherwise it is untouched.">?</sup>
         </label>
       </form>
       <button class="btn btn-primary" ng-disabled='userChoice == false' ng-click="load_conf()">Load</button></br>
