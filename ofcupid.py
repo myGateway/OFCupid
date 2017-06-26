@@ -502,6 +502,13 @@ class PatchPanel(app_manager.RyuApp):
                     link = Link(Port(in_port), Port(output))
                     self.log.debug("Adding link %s to %s", link, self.datapaths[dp.id])
                     self.datapaths[dp.id].mappings.add(link)
+                elif output.endswith(".-1"):
+                    # Try again with untagged instead of native
+                    output = output[:-2] + "0"
+                    if output in in_ports:
+                        link = Link(Port(in_port), Port(output))
+                        self.log.debug("Adding link %s to %s", link, self.datapaths[dp.id])
+                        self.datapaths[dp.id].mappings.add(link)
 
         default_conf_file = "default_" + str(dp.id)
         default_conf_path = self.validate_path(self.conf['saved_configs_dir'],
