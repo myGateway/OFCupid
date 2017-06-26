@@ -58,6 +58,38 @@ class Link(object):
         self.portb = max(porta, portb)
         # False for bidirectional, or set to output port
         self.unidirectional = False
+        # Disallow VLAN <> Tagged
+        if ((1 <= porta.vlan <= 0xFFE and portb.vlan == 0xFFF) or
+                (1 <= portb.vlan <= 0xFEE and porta.vlan == 0xFFF)):
+            raise ValueError("A specific VLAN <> Tagged link cannot be created"
+                             ", as its behaviour is undefined. Consider using "
+                             "a VLAN <> VLAN or Tagged <> Tagged link instead."
+                             )
+        # Disallow Tagged <> Native
+        if ((porta.vlan == 0xFFF and portb.vlan == -1) or
+                (portb.vlan == 0xFFF and porta.vlan == -1)):
+            raise ValueError("A Tagged <> Native link cannot be created, "
+                             "as its behaviour is undefined.")
+        # Disallow Tagged <> Native
+        if ((porta.vlan == 0xFFF and portb.vlan == 0) or
+                (portb.vlan == 0xFFF and porta.vlan == 0)):
+            raise ValueError("A Tagged <> Untagged link cannot be created, "
+                             "as its behaviour is undefined.")
+        # Disallow Untagged <> Native
+        if ((porta.vlan == 0 and portb.vlan == -1) or
+                (portb.vlan == 0 and porta.vlan == -1)):
+            raise ValueError("A Untagged <> Native link cannot be created, "
+                             "as its behaviour is undefined. Use either Native "
+                             "<> Native or Untagged <> Untagged")
+
+    @staticmethod
+    def valid(porta, portb):
+        """ Check if this port is valid to create, returns True or False """
+        try:
+            Link(porta, portb)
+            return True
+        except:
+            return False
 
     def __str__(self):
         return "{}<->{}".format(self.porta, self.portb)
@@ -103,7 +135,7 @@ class Port(object):
 
     def set_vlan(self, vlan):
         vlan = int(vlan)
-        if vlan >= -1 and vlan <= 4095:
+        if -1 <= vlan <= 0xFFF:
             self._vlan_vid = int(vlan)
         else:
             raise ValueError("VLAN must be between -1 and 4095")
@@ -128,7 +160,7 @@ class Port(object):
             return PatchPanel.NORMAL_PRIORITY
         elif self.vlan == 0 or self.vlan == 0xFFF:
             return PatchPanel.TAGGED_PRIORITY
-        elif self.vlan > 0 and self.vlan < 0xFFF:
+        elif 0 < self.vlan < 0xFFF:
             return PatchPanel.VLAN_PRIORITY
 
     def get_of_match(self, parser):
@@ -140,7 +172,7 @@ class Port(object):
         elif self.vlan == 0xFFF:
             vlan_match = (ofproto_v1_3.OFPVID_PRESENT,
                           ofproto_v1_3.OFPVID_PRESENT)
-        elif self.vlan > 0 and self.vlan < 0xFFF:
+        elif 0 < self.vlan < 0xFFF:
             vlan_match = self.vlan|ofproto_v1_3.OFPVID_PRESENT
         else:
             raise ValueError("get_of_match: Port has an invalid VLAN")
@@ -502,14 +534,14 @@ class PatchPanel(app_manager.RyuApp):
         for in_port, outputs in in_ports.iteritems():
             # If both directions exist add a link
             for output in outputs:
-                if output in in_ports:
+                if output in in_ports and Link.valid(Port(in_port), Port(output)):
                     link = Link(Port(in_port), Port(output))
                     self.log.debug("Adding link %s to %s", link, self.datapaths[dp.id])
                     self.datapaths[dp.id].mappings.add(link)
                 elif output.endswith(".-1"):
                     # Try again with untagged instead of native
                     output = output[:-2] + "0"
-                    if output in in_ports:
+                    if output in in_ports and Link.valid(Port(in_port), Port(output)):
                         link = Link(Port(in_port), Port(output))
                         self.log.debug("Adding link %s to %s", link, self.datapaths[dp.id])
                         self.datapaths[dp.id].mappings.add(link)
