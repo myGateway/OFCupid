@@ -94,7 +94,7 @@
           Exclusive Merge<sup title="If a port is included in the configuration its links are removed and replaced with those from the configuration file, otherwise it is untouched.">?</sup>
         </label>
       </form>
-      <button class="btn btn-primary" ng-disabled='userChoice == false' ng-click="load_conf()">Load</button></br>
+      <button class="btn btn-primary" ng-disabled='userChoice == false' ng-click="load_conf()">Load {{dpid_name == '' ? '' : '(' + dpid_name +  ')'}}</button></br>
     </div>
 
     <div class="form-inline">

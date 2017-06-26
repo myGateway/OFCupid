@@ -832,9 +832,12 @@ class PatchPanel(app_manager.RyuApp):
         return configs
 
     def emulate_conf(self, config, merge="replace", dpid=""):
+        dpids = self.parse_dpids(dpid)
         if merge == "replace":
             emulated_datapaths = {}
             for dpid, ports in config.iteritems():
+                if dpid not in dpids:
+                    continue
                 datapath = DPID(dpid)
                 for src, dests in ports.iteritems():
                     src_port = Port(src)
@@ -845,6 +848,8 @@ class PatchPanel(app_manager.RyuApp):
         elif merge == "merge":
             emulated_datapaths = copy.deepcopy(self.datapaths)
             for dpid, ports in config.iteritems():
+                if dpid not in dpids:
+                    continue
                 for src, dests in ports.iteritems():
                     src_port = Port(src)
                     for dst in dests:
@@ -853,6 +858,8 @@ class PatchPanel(app_manager.RyuApp):
         elif merge == "merge_exclusive":
             emulated_datapaths = copy.deepcopy(self.datapaths)
             for dpid, ports in config.iteritems():
+                if dpid not in dpids:
+                    continue
                 for src, dests in ports.iteritems():
                     src_port = Port(src)
                     links = [

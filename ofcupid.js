@@ -82,6 +82,13 @@ app.factory("logIntercept", function() {
 var pickSwitch = function ($scope, $http, $rootScope, $log) {
   $scope.select_switch = function() {
     $rootScope.dpid = $scope.userChoice;
+    $rootScope.dpid_name = "";
+    for (var i in $scope.switches) {
+      var i = $scope.switches[i];
+      if (i.dpid == $scope.userChoice) {
+        $rootScope.dpid_name = i.dpid_name;
+      }
+    }
     $rootScope.$emit('refresh');
   };
 
@@ -104,6 +111,7 @@ var pickSwitch = function ($scope, $http, $rootScope, $log) {
   };
 
   $rootScope.dpid = "";
+  $rootScope.dpid_name = "";
   $scope.userChoice = "";
   $scope.refresh();
 };
